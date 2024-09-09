@@ -1,0 +1,493 @@
+#pragma once
+
+#include "tiny_vector.h"
+#include <algorithm>
+
+namespace Tiny
+{
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+class hashtable;
+
+const int num_primes = 28;
+const unsigned prime_list[num_primes] = {
+    53, 97, 193, 389, 769,
+    1543, 3079, 6151, 12289, 24593,
+    49157, 98317, 196613, 393241, 786433,
+    1572869, 3145739, 6291469, 12582917, 25165843,
+    50331653, 100663319, 201326611, 402653189, 805306457,
+    1610612741, 3221225473u, 4294967291u
+};
+
+template <typename Value>
+struct __hashtable_node
+{
+    using node = __hashtable_node<Value>;
+    node* next;
+    Value val;
+};
+
+template <typename Value, typename Key, typename HashFcn,
+        typename ExtractKey, typename EqualKey, typename Alloc>
+struct __hashtable_iterator
+{
+    using hashtable = hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+    using node = __hashtable_node<Value>;
+    using self = __hashtable_iterator<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+
+    using iterator_category = forward_iterator_tag;
+    using value_type = Value;
+    using difference_type = ptrdiff_t;
+    using size_type = size_t;
+    using reference = Value&;
+    using pointer = Value*;
+
+    node* cur;
+    hashtable* ht;
+
+    __hashtable_iterator() = default;
+    __hashtable_iterator(node* n, hashtable* tab) : cur(n), ht(tab) { }
+    reference operator*() const { return cur->val; }
+    pointer operator->() const { return &(operator*()); }
+    bool operator==(__hashtable_iterator it) const { return cur == it.cur; }
+    bool operator!=(__hashtable_iterator it) const { return cur != it.cur; }
+    
+    self& operator++()
+    {
+        const node* old = cur;
+        cur = cur->next;
+        if (cur) return *this;
+
+        size_type buc = ht->bkt_num(old->val);
+        while (!cur and ++buc < ht->buckets.size())
+            cur = ht->buckets[buc];
+        return *this;
+    }
+    self operator++(int)
+    {
+        self tmp = *this;
+        ++*this;
+        return tmp;
+    }
+};
+
+template <typename Value, typename Key, typename HashFcn,
+        typename ExtractKey, typename EqualKey, typename Alloc>
+struct __hashtable_const_iterator
+{
+    using hashtable = hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+    using node = __hashtable_node<Value>;
+    using iterator = __hashtable_iterator<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+    using self = __hashtable_const_iterator<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+
+    using iterator_category = forward_iterator_tag;
+    using value_type = Value;
+    using difference_type = ptrdiff_t;
+    using size_type = size_t;
+    using reference = const Value&;
+    using pointer = const Value*;
+
+    const node* cur;
+    const hashtable* ht;
+
+    __hashtable_const_iterator() = default;
+    __hashtable_const_iterator(iterator it) : cur(it.cur), ht(it.ht) { }
+    __hashtable_const_iterator(const node* n, const hashtable* tab) : cur(n), ht(tab) { }
+    reference operator*() const { return cur->val; }
+    pointer operator->() const { return &(operator*()); }
+    bool operator==(__hashtable_const_iterator it) const { return cur == it.cur; }
+    bool operator!=(__hashtable_const_iterator it) const { return cur != it.cur; }
+    
+    self& operator++()
+    {
+        const node* old = cur;
+        cur = cur->next;
+        if (cur) return *this;
+
+        size_type buc = ht->bkt_num(old->val);
+        while (!cur and ++buc < ht->buckets.size())
+            cur = ht->buckets[buc];
+        return *this;
+    }
+    self operator++(int)
+    {
+        self tmp = *this;
+        ++*this;
+        return tmp;
+    }
+};
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+class hashtable
+{
+public:
+    using hasher = HashFcn;
+    using key_equal = EqualKey;
+    using value_type = Value;
+    using key_type = Key;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using iterator = __hashtable_iterator<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+    using const_iterator = __hashtable_const_iterator<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    
+    friend class __hashtable_iterator<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+    friend class __hashtable_const_iterator<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>;
+
+private:
+    hasher hash;
+    key_equal equals;
+    ExtractKey get_key;
+
+    using node = __hashtable_node<Value>;
+    using node_allocator = simple_alloc<node, Alloc>;
+    vector<node*, Alloc> buckets;
+    size_type num_elements;
+
+    static unsigned next_prime(unsigned n)
+    {
+        const unsigned* first = prime_list;
+        const unsigned* last = prime_list + num_primes;
+        const unsigned* pos = std::lower_bound(first, last, n);
+        return pos == last ? *(last - 1) : *pos;
+    }
+
+public:
+
+    hasher hash_funct() const { return hash; }
+    key_equal key_eq() const { return equals; }
+    size_type max_bucket_count() const { return prime_list[num_primes - 1]; }
+    size_type bucket_count() const { return buckets.size(); }
+    size_type next_size(size_type n) const { return next_prime(n); }
+    size_type elems_in_bucket(size_type n) const {
+        size_type count = 0;
+        for (node* cur = buckets[n]; cur; cur = cur->next)
+            count++;
+        return count;
+    }
+
+private:
+    node* new_node(const value_type& obj)
+    {
+        node* n = node_allocator::allocate();
+        n->next = nullptr;
+        try {
+            construct(&n->val, obj);
+            return n;
+        }
+        catch (...) {
+            node_allocator::deallocate(n);
+            throw;
+        }
+    }
+    void delete_node(node* n) 
+    {
+        destroy(&n->val);
+        node_allocator::deallocate(n);
+    }
+    void initialize_buckets(size_type n)
+    {
+        const size_type n_buckets = next_size(n);
+        buckets.reserve(n_buckets);
+        buckets.assign(n_buckets, nullptr);
+        num_elements = 0;
+    }
+
+public:
+    size_type bkt_num(const value_type& obj, size_type n) const {
+        return bkt_num_key(get_key(obj), n);
+    }
+    size_type bkt_num(const value_type& obj) const {
+        return bkt_num_key(get_key(obj));
+    }
+    size_type bkt_num_key(const key_type& key) const {
+        return bkt_num_key(key, buckets.size());
+    }
+    size_type bkt_num_key(const key_type& key, size_type n) const {
+        return hash(key) % n;
+    }
+
+    iterator begin() {
+        for (node* cur : buckets)
+        {
+            if (!cur) continue;
+            return iterator(cur, this);
+        }
+        return iterator(nullptr, this);
+    }
+    const_iterator begin() const {
+        for (const node* cur : buckets)
+        {
+            if (!cur) continue;
+            return const_iterator(cur, this);
+        }
+        return const_iterator(nullptr, this);
+    }
+    iterator end() {
+        return iterator(nullptr, this);
+    }
+    const_iterator end() const {
+        return const_iterator(nullptr, this);
+    }
+    size_type size() const {
+        return num_elements;
+    }
+    bool empty() const {
+        return num_elements == 0;
+    }
+
+    hashtable(size_type n, const hasher& hf, const key_equal& eql)
+        : hash(hf), equals(eql), get_key(ExtractKey()), num_elements(0)
+    { 
+        initialize_buckets(n); 
+    }
+    hashtable(const hashtable& ht) 
+        : hash(ht.hash), equals(ht.equals), get_key(ht.get_key)
+    {
+        copy_from(ht);
+    }
+    hashtable(hashtable&& ht) 
+        : hash(ht.hash), equals(ht.equals), get_key(ht.get_key)
+    {
+        buckets.swap(ht.buckets);
+        num_elements = ht.num_elements;
+        ht.buckets.resize(0);
+    }
+    ~hashtable() { clear(); }
+    
+    void resize(size_type num_elements_hint);
+    auto insert_unique_noresize(const value_type&) -> std::pair<iterator, bool>;
+    auto insert_equal_noresize(const value_type&) -> iterator;
+    void swap(hashtable& ht) {
+        std::swap(hash, ht.hash);
+        std::swap(equals, ht.equals);
+        std::swap(get_key, ht.get_key);
+        std::swap(num_elements, ht.num_elements);
+        buckets.swap(ht.buckets);
+    }
+    auto insert_unique(const value_type& obj) -> std::pair<iterator, bool> {
+        resize(num_elements + 1);
+        return insert_unique_noresize(obj);
+    }
+    auto insert_equal(const value_type& obj) -> iterator {
+        resize(num_elements + 1);
+        return insert_equal_noresize(obj);
+    }
+    auto erase(const key_type&) -> size_type;
+    void erase(iterator);
+    void clear();
+    void copy_from(const hashtable&);
+    iterator find(const key_type&);
+    const_iterator find(const key_type&) const;
+    size_type count(const key_type&) const;
+};
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+void hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::resize(size_type num_elements_hint)
+{
+    const size_type old_n = buckets.size();
+    if (num_elements_hint <= old_n) return;
+    
+    const size_type n = next_size(num_elements_hint);
+    if (n <= old_n) return;
+    vector<node*, Alloc> tmp(n, nullptr);
+    for (size_type bucket = 0; bucket < old_n; bucket++)
+    {
+        node* first = buckets[bucket];
+        while (first)
+        {
+            size_type new_bucket = bkt_num(first->val, n);
+            buckets[bucket] = first->next;
+            first->next = tmp[new_bucket];
+            tmp[new_bucket] = first;
+            first = buckets[bucket];
+        }
+    }
+    buckets.swap(tmp);
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+auto hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::insert_unique_noresize(const value_type& x) -> std::pair<iterator, bool>
+{
+    const size_type n = bkt_num(x);
+    node* first = buckets[n];
+
+    for (node* cur = first; cur; cur = cur->next)
+        if (equals(get_key(cur->val), get_key(x)))
+            return {iterator(cur, this), false};
+    node* tmp = new_node(x);
+    tmp->next = first;
+    buckets[n] = tmp;
+    ++num_elements;
+    return { iterator(tmp, this), true };
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+auto hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::insert_equal_noresize(const value_type& x) -> iterator
+{
+    const size_type n = bkt_num(x);
+    node* first = buckets[n];
+    node* tmp = new_node(x);
+    tmp->next = first;
+    buckets[n] = tmp;
+    num_elements++;
+    return iterator(tmp, this);
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+auto hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::erase(const key_type& key) -> size_type
+{
+    const size_type n = bkt_num_key(key);
+    node* first = buckets[n];
+    size_type erased = 0;
+
+    if (!first) return 0;
+
+    node* cur = first;
+    node* next = cur->next;
+    while (next)
+    {
+        if (equals(get_key(next->val), key))
+        {
+            cur->next = next->next;
+            delete_node(next);
+            next = cur->next;
+            erased++;
+            num_elements--;
+        }
+        else {
+            cur = next;
+            next = cur->next;
+        }
+    }
+
+    if (equals(get_key(first->val), key))
+    {
+        buckets[n] = first->next;
+        delete_node(first);
+        erased++;
+        num_elements--;
+    }
+    return erased;
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+void hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::erase(iterator pos)
+{
+    node* p = pos.cur;
+    if (p == nullptr) return;
+    
+    const size_type n = bkt_num(p->val);
+    node* cur = buckets[n];
+    if (cur == p) {
+        buckets[n] = cur->next;
+        delete_node(cur);
+        num_elements--;
+        return;
+    }
+
+    node* next = cur->next;
+    while (next)
+    {
+        if (next == p) {
+            cur->next = next->next;
+            delete_node(next);
+            num_elements--;
+            break;
+        }
+        cur = next;
+        next = cur->next;
+    }
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+void hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::clear()
+{
+    for (node* cur : buckets)
+    {
+        while (cur != nullptr) {
+            node* next = cur->next;
+            delete_node(cur);
+            cur = next;
+        }
+    }
+    num_elements = 0;
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+void hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::copy_from(const hashtable& ht)
+{
+    size_type new_size = ht.buckets.size();
+    buckets.clear();
+    buckets.reserve(new_size);
+    buckets.assign(new_size, nullptr);
+    try {
+        for (size_type i = 0; i < new_size; i++)
+        {
+            const node* cur = ht.buckets[i];
+            if (!cur) continue;
+
+            node* copy = new_node(cur->val);
+            buckets[i] = copy;
+            for (node* next = cur->next; next; cur = next, next = cur->next)
+            {
+                copy->next = new_node(next->val);
+                copy = copy->next;
+            }
+        }
+    }
+    catch (...) {
+        clear();
+        throw;
+    }
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+auto hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::find(const key_type& key) -> iterator
+{
+    size_type n = bkt_num_key(key);
+    node* first;
+    for (first = buckets[n]; first; first = first->next)
+        if (equals(get_key(first->val), key))
+            break;
+    return iterator(first, this);
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+auto hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::find(const key_type& key) const -> const_iterator
+{
+    size_type n = bkt_num_key(key);
+    node* first;
+    for (first = buckets[n]; first; first = first->next)
+        if (equals(get_key(first->val), key))
+            break;
+    return const_iterator(first, this);
+}
+
+template <typename Value, typename Key, typename HashFcn, 
+        typename ExtractKey, typename EqualKey, typename Alloc>
+auto hashtable<Value, Key, HashFcn, ExtractKey, EqualKey, Alloc>::count(const key_type& key) const -> size_type
+{
+    const size_type n = bkt_num_key(key);
+    size_type result = 0;
+    for (const node* cur = buckets[n]; cur; cur = cur->next)
+        if (equals(get_key(cur->val), key))
+            result++;
+    return result;
+}
+
+}
